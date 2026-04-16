@@ -1,0 +1,20 @@
+services:
+  - type: worker
+    name: bcrp-scanner-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    region: oregon
+    plan: free
+    envVars:
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      - key: SCANNER_BOT_GUILD_ID
+        sync: false
+      - key: SCANNER_CHANNEL_ID
+        sync: false
+      - key: SCANNER_INTERNAL_SECRET
+        sync: false
+      - key: SCANNER_WS_URL
+        sync: false
+      - key: PORT
+        value: 3000
