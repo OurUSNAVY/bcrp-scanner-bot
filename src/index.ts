@@ -21,6 +21,10 @@ const API_WS_URL =
 const SCANNER_SECRET =
   process.env["SCANNER_INTERNAL_SECRET"] ?? "dev-scanner-secret";
 
+// On Replit, outbound UDP is blocked so voice will never connect.
+// Skip voice entirely here and let the external Railway deployment handle it.
+const VOICE_DISABLED = !!process.env["REPL_ID"] || process.env["SCANNER_DISABLE_VOICE"] === "true";
+
 // ── PCM constants (must match api-server and bcrp-phone) ─────────────────────
 const SAMPLE_RATE = 48_000;
 const CHANNELS = 2;
@@ -105,6 +109,11 @@ const client = new Client({
 
 client.once("ready", () => {
   console.log(`[Scanner] Bot ready as ${client.user?.tag}`);
+
+  if (VOICE_DISABLED) {
+    console.log("[Scanner] Voice disabled on this host (UDP not available). Relay-only mode — waiting for external bot to stream audio.");
+    return;
+  }
 
   if (!GUILD_ID || !CHANNEL_ID) {
     console.warn(
