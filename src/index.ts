@@ -109,7 +109,21 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
 });
 
-client.once("ready", () => {
+// Log raw gateway VOICE_SERVER_UPDATE — this is the key event that moves
+// the voice connection from Signalling → Connecting. If we never see this
+// log it means Discord's gateway is not responding to our voice join request.
+client.ws.on("VOICE_SERVER_UPDATE" as any, (data: unknown) => {
+  console.log("[Scanner] ✓ VOICE_SERVER_UPDATE received from gateway:", JSON.stringify(data));
+});
+
+client.ws.on("VOICE_STATE_UPDATE" as any, (data: unknown) => {
+  const d = data as Record<string, unknown>;
+  if (d["user_id"] === client.user?.id) {
+    console.log("[Scanner] VOICE_STATE_UPDATE (self):", JSON.stringify({ channel_id: d["channel_id"], guild_id: d["guild_id"] }));
+  }
+});
+
+client.once("clientReady", () => {
   console.log(`[Scanner] Bot ready as ${client.user?.tag}`);
 
   if (VOICE_DISABLED) {
@@ -121,43 +135,60 @@ client.once("ready", () => {
     console.warn(
       "[Scanner] SCANNER_BOT_GUILD_ID or SCANNER_CHANNEL_ID not set — not joining any channel."
     );
-    console.warn(
-      "[Scanner] Set both env vars and restart the scanner-bot workflow to start relaying audio."
-    );
     return;
   }
 
-  joinRTO();
+  // Small delay so guild cache is fully populated after ready
+  setTimeout(joinRTO, 3_000);
 });
 
-// Exponential backoff state for voice retries
+// ── Voice retry state — single flag prevents duplicate retry loops ────────────
+let voiceRetrying = false;
 let voiceRetryDelay = 15_000;
-const VOICE_RETRY_MAX = 120_000; // cap at 2 minutes
+const VOICE_RETRY_MAX = 120_000;
+
+function scheduleRetry(delaySecs?: number) {
+  if (voiceRetrying) {
+    console.log("[Scanner] Retry already scheduled — skipping duplicate");
+    return;
+  }
+  voiceRetrying = true;
+  const delay = delaySecs ?? voiceRetryDelay;
+  voiceRetryDelay = Math.min(voiceRetryDelay * 2, VOICE_RETRY_MAX);
+  console.log(`[Scanner] Retrying voice in ${delay / 1000} s …`);
+  setTimeout(() => {
+    voiceRetrying = false;
+    joinRTO();
+  }, delay);
+}
 
 function joinRTO() {
   if (!GUILD_ID || !CHANNEL_ID) return;
 
-  // Destroy any stale connection for this guild first —
-  // leaving a zombie connection causes Discord to ignore new VOICE_STATE_UPDATEs.
+  // Destroy any stale connection for this guild. If one exists, send an
+  // explicit REST call to leave the channel first (clears Discord's voice
+  // state server-side), then wait 5s before creating a new connection.
   const existing = getVoiceConnection(GUILD_ID);
   if (existing) {
     console.log("[Scanner] Destroying stale voice connection before reconnecting …");
+    // Leave the voice channel at the REST level so Discord clears the state
+    const guild = client.guilds.cache.get(GUILD_ID);
+    guild?.members.me?.voice.disconnect("Scanner reconnecting").catch(() => {});
     existing.destroy();
-    // Give the gateway a moment to process the disconnect before we rejoin
-    setTimeout(() => joinRTO(), 2_000);
+    setTimeout(joinRTO, 5_000);
     return;
   }
 
   const guild = client.guilds.cache.get(GUILD_ID);
   if (!guild) {
     console.error(`[Scanner] Guild ${GUILD_ID} not found in cache. Retrying in 10 s …`);
-    setTimeout(joinRTO, 10_000);
+    scheduleRetry(10_000);
     return;
   }
 
   const channel = guild.channels.cache.get(CHANNEL_ID);
   if (!channel || !channel.isVoiceBased()) {
-    console.error(`[Scanner] Channel ${CHANNEL_ID} not found or is not a voice channel. Check SCANNER_CHANNEL_ID env var.`);
+    console.error(`[Scanner] Channel ${CHANNEL_ID} not found or is not a voice channel (check SCANNER_CHANNEL_ID). No retry.`);
     return;
   }
 
@@ -172,19 +203,30 @@ function joinRTO() {
   });
 
   let joined = false;
-  let stateLoggedAt = Date.now();
+  let timeoutHandle: ReturnType<typeof setTimeout>;
+
+  const cleanup = (reason: string) => {
+    clearTimeout(timeoutHandle);
+    if (!joined) return; // already cleaned up
+    joined = false;
+    connection.destroy();
+    userBuffers.clear();
+    voiceRetryDelay = 15_000; // reset backoff
+    console.log(`[Scanner] Voice cleanup: ${reason}`);
+  };
 
   connection.on(VoiceConnectionStatus.Signalling, () => {
-    stateLoggedAt = Date.now();
-    console.log("[Scanner] Voice: Signalling — waiting for Discord voice server assignment …");
+    console.log("[Scanner] Voice: Signalling — waiting for VOICE_SERVER_UPDATE from Discord gateway …");
   });
+
   connection.on(VoiceConnectionStatus.Connecting, () => {
-    stateLoggedAt = Date.now();
-    console.log(`[Scanner] Voice: Connecting (UDP handshake) … elapsed=${Date.now() - stateLoggedAt}ms`);
+    console.log("[Scanner] Voice: Connecting (UDP handshake) …");
   });
+
   connection.on(VoiceConnectionStatus.Ready, () => {
+    clearTimeout(timeoutHandle);
     joined = true;
-    voiceRetryDelay = 15_000; // reset backoff on success
+    voiceRetryDelay = 15_000;
     console.log(`[Scanner] ✓ Joined #${channel.name} — listening for audio …`);
     const receiver = connection.receiver;
 
@@ -218,44 +260,28 @@ function joinRTO() {
   });
 
   connection.on(VoiceConnectionStatus.Disconnected, () => {
-    if (joined) {
-      console.log("[Scanner] Disconnected from voice channel — retrying in 5 s …");
-      joined = false;
-      connection.destroy();
-      userBuffers.clear();
-      voiceRetryDelay = 15_000;
-      setTimeout(joinRTO, 5_000);
-    }
+    if (!joined) return; // pre-ready disconnect — timeout will handle it
+    console.log("[Scanner] Disconnected from voice channel.");
+    cleanup("disconnected");
+    scheduleRetry(5_000);
   });
 
-  // Diagnose if stuck in Signalling: log a raw VOICE_SERVER_UPDATE check after 8s
-  setTimeout(() => {
-    if (!joined) {
-      const state = connection.state.status;
-      console.warn(
-        `[Scanner] Still waiting after 8 s — current state: ${state}. ` +
-        "If stuck at 'signalling', Discord gateway is not responding with VOICE_SERVER_UPDATE. " +
-        "This usually means: rapid reconnects rate-limited, or the channel has unusual settings."
-      );
-    }
-  }, 8_000);
+  connection.on(VoiceConnectionStatus.Destroyed, () => {
+    clearTimeout(timeoutHandle);
+  });
 
-  // Full timeout with exponential backoff
-  setTimeout(() => {
-    if (!joined) {
-      const state = connection.state.status;
-      console.error(`[Scanner] ⚠ Voice not ready after 30 s (state=${state}). Backing off ${voiceRetryDelay / 1000}s before retry …`);
-      connection.destroy();
-      userBuffers.clear();
-      const delay = voiceRetryDelay;
-      voiceRetryDelay = Math.min(voiceRetryDelay * 2, VOICE_RETRY_MAX);
-      setTimeout(joinRTO, delay);
-    }
-  }, 30_000);
+  // Timeout: give the connection 35s to reach Ready state
+  timeoutHandle = setTimeout(() => {
+    if (joined) return;
+    const state = connection.state.status;
+    console.error(`[Scanner] ⚠ Voice not ready after 35 s (state=${state}). Backing off ${voiceRetryDelay / 1000}s …`);
+    connection.destroy();
+    userBuffers.clear();
+    scheduleRetry();
+  }, 35_000);
 }
 
-// ── Health check HTTP server (required by Railway — without it Railway restarts the
-//    process every ~5 minutes when health checks fail, dropping the WebSocket feed) ─
+// ── Health check HTTP server (required by Railway) ────────────────────────────
 const HEALTH_PORT = parseInt(process.env["PORT"] ?? "3000", 10);
 http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "application/json" });
