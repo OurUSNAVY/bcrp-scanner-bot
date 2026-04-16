@@ -1,11 +1,13 @@
 {
-  "name": "@workspace/scanner-bot",
-  "version": "0.0.0",
+  "name": "bcrp-scanner-bot",
+  "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "node dist/index.js",
-    "build": "tsc"
+    "start": "npx tsx src/index.ts",
+    "dev": "npx tsx watch src/index.ts"
   },
   "dependencies": {
     "@discordjs/voice": "^0.18.0",
@@ -15,7 +17,7 @@
   },
   "devDependencies": {
     "@types/ws": "^8.18.1",
-    "tsx": "catalog:",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.0"
   }
 }
