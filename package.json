@@ -1,0 +1,21 @@
+{
+  "name": "@workspace/scanner-bot",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.18.0",
+    "discord.js": "^14.18.0",
+    "opusscript": "^0.1.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "tsx": "catalog:",
+    "typescript": "^5.9.0"
+  }
+}
