@@ -1,3 +1,4 @@
+import http from "http";
 import { Client, GatewayIntentBits } from "discord.js";
 import {
   joinVoiceChannel,
@@ -217,6 +218,20 @@ function joinRTO() {
     }
   }, 20_000);
 }
+
+// ── Health check HTTP server (required by Railway — without it Railway restarts the
+//    process every ~5 minutes when health checks fail, dropping the WebSocket feed) ─
+const HEALTH_PORT = parseInt(process.env["PORT"] ?? "3000", 10);
+http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({
+    status: "ok",
+    wsConnected: wsReady,
+    voiceDisabled: VOICE_DISABLED,
+  }));
+}).listen(HEALTH_PORT, () => {
+  console.log(`[Scanner] Health check server listening on port ${HEALTH_PORT}`);
+});
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 if (!BOT_TOKEN) {
